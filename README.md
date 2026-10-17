@@ -40,8 +40,8 @@ Agentic_AI_Assignment/
 ### 1. Clone the repository
 
 ```bash
-git clone YOUR_REPOSITORY_URL
-cd Agentic_AI_Assignment
+git clone https://github.com/Srushtinarwade/Agentic-AI-Memory-System.git
+cd Agentic-AI-Memory-System
 ```
 
 ### 2. Create and activate a virtual environment
