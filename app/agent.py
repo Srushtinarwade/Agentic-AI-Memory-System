@@ -11,11 +11,13 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, START, END
 
 from app.memory.short_term import add_message, get_recent_messages
-from app.memory.long_term import (
+
+from app.memory.vector_store import (
     add_memory,
     list_memories,
     forget_memory,
     update_memory,
+    search_memories,
 )
 
 load_dotenv()
@@ -256,44 +258,29 @@ def _expanded_tokens(words: set[str]) -> set[str]:
     return result
 
 
-def retrieve(state: AgentState) -> dict:
-    """Retrieve recent session history and the five most relevant user memories."""
-    session_id = state["session_id"]
-    query = state["message"].lower()
-    history = get_recent_messages(state["user_id"], session_id, limit=10)
-    memories = list_memories(state["user_id"])
 
-    query_words = _expanded_tokens(_tokens(query))
-    is_preference_question = bool(PREFERENCE_QUERY_TERMS & set(re.findall(r"[a-z]+", query)))
-    is_general_recall = any(phrase in query for phrase in (
-        "what do you remember", "what do you know about me", "tell me about me",
-        "what have i told you", "summarize what you know",
+def retrieve(state: AgentState) -> dict:
+    user_id = state["user_id"]
+    query = state["message"]
+    history = get_recent_messages(
+        user_id, state["session_id"], limit=10
+    )
+
+    general_recall = any(phrase in query.lower() for phrase in (
+        "what do you remember",
+        "what do you know about me",
+        "tell me about me",
+        "what have i told you",
+        "summarize what you know",
     ))
 
-    ranked = []
-    for index, memory in enumerate(memories):
-        content = memory.get("content", "")
-        content_words = _expanded_tokens(_tokens(content))
-        overlap = len(query_words & content_words)
-        score = overlap
+    memories = (
+        list_memories(user_id)[:5]
+        if general_recall
+        else search_memories(user_id, query, limit=5)
+    )
 
-        if is_preference_question and (PREFERENCE_MEMORY_TERMS & set(re.findall(r"[a-z]+", content.lower()))):
-            score += 3
-        if is_general_recall:
-            score += 1
-        # Favor memories with higher word overlap; index preserves ordering for ties.
-        if score > 0:
-            ranked.append((score, -index, memory))
-
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = [item[2] for item in ranked[:5]]
-
-    # General recall should return recent memories even if the query has no topical keywords.
-    if is_general_recall and not selected:
-        selected = memories[:5]
-
-    return {"history": history, "memories": selected}
-
+    return {"history": history, "memories": memories}
 
 # ------------------------------- Chat ------------------------------------
 def respond(state: AgentState) -> dict:

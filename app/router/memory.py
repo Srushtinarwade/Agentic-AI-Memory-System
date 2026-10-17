@@ -3,7 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
-from app.memory.long_term import (
+from app.memory.vector_store import (
     add_memory,
     get_memory,
     list_memories,
