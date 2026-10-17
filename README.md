@@ -21,7 +21,7 @@ Python · FastAPI · LangGraph · Google Gemini · Redis · Streamlit
 ## Project Structure
 
 ```text
-Agentic_AI_Assignment/
+Agentic-AI-Memory-System//
 ├── app/
 │   ├── memory/
 │   └── router/
