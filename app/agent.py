@@ -120,6 +120,9 @@ FORGET_STOPWORDS = {
     "all", "information", "memory", "memories", "fact", "facts", "details",
     "that", "this", "it", "related", "regarding", "personal", "interest",
     "interests", "thing", "things", "data", "saved",
+    # Negation and filler words should not count as memory subjects.
+    "ok", "okay", "dont", "doesnt", "didnt", "anymore", "longer",
+    "no", "not", "stop", "stopped", "remembering", "any",
 }
 
 
@@ -154,7 +157,7 @@ def handle_forget(state: AgentState) -> dict:
         return {"forget_request": False}
 
     terms = _forget_terms(message)
-    if len(terms) < 2:
+    if not terms:
         return {
             "forget_request": True,
             "answer": (
@@ -165,7 +168,12 @@ def handle_forget(state: AgentState) -> dict:
 
     memories = list_memories(state["user_id"])
     matches = []
-    required_overlap = max(2, (len(terms) * 3 + 4) // 5)
+    # If the request identifies one subject (for example, "cricket"),
+    # one matching word is enough. Longer requests require multiple matches.
+    required_overlap = (
+        1 if len(terms) == 1
+        else max(2, (len(terms) * 3 + 4) // 5)
+    )
     for memory in memories:
         content_words = set(re.findall(r"[a-z]+", memory.get("content", "").lower()))
         if "interested" in content_words:
@@ -252,7 +260,7 @@ def retrieve(state: AgentState) -> dict:
     """Retrieve recent session history and the five most relevant user memories."""
     session_id = state["session_id"]
     query = state["message"].lower()
-    history = get_recent_messages(session_id, limit=10)
+    history = get_recent_messages(state["user_id"], session_id, limit=10)
     memories = list_memories(state["user_id"])
 
     query_words = _expanded_tokens(_tokens(query))
