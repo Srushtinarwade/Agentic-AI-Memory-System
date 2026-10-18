@@ -1,4 +1,3 @@
-"""FastAPI lifespan owns PostgreSQL checkpoints, pgvector facts, Redis and Gemini."""
 from __future__ import annotations
 
 import logging
@@ -29,50 +28,45 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = Settings()
     dsn = settings.postgres_dsn.get_secret_value()
-    if not dsn:
-        raise RuntimeError("POSTGRES_DSN is missing; copy .env.example to .env")
-    if not settings.gemini_api_key.get_secret_value():
-        raise RuntimeError("GEMINI_API_KEY is missing; copy .env.example to .env")
+    if not dsn or not settings.gemini_api_key.get_secret_value():
+        raise RuntimeError("Set POSTGRES_DSN and GEMINI_API_KEY in .env")
 
-    # Checkpoint saver supports psycopg3 pools. autocommit and dict_row are
-    # required by LangGraph; prepare_threshold=None also supports PgBouncer.
     async with AsyncConnectionPool(
-        dsn, min_size=settings.pg_pool_min_size, max_size=settings.pg_pool_max_size,
+        dsn,
+        min_size=settings.pg_pool_min_size,
+        max_size=settings.pg_pool_max_size,
         kwargs={"autocommit": True, "row_factory": dict_row, "prepare_threshold": None},
         open=False,
     ) as pool:
         await pool.wait(timeout=30)
-        store = PostgresMemoryStore(pool)
-        checkpointer = AsyncPostgresSaver(pool)
-        embedder = None
-        brain = None
-        redis_client = None
+        store, checkpointer = PostgresMemoryStore(pool), AsyncPostgresSaver(pool)
+        embedder = brain = redis_client = None
         try:
-            logger.info("Initializing PostgreSQL memory tables and LangGraph checkpoints...")
             await store.initialize()
-            await checkpointer.setup()  # migrations; idempotent, requires DDL privileges
-
-            redis_url = settings.redis_url.get_secret_value()
+            await checkpointer.setup()
             cache = None
-            if redis_url:
+            if settings.redis_url.get_secret_value():
                 from redis.asyncio import Redis
 
                 try:
-                    redis_client = Redis.from_url(redis_url, decode_responses=True, socket_timeout=2)
+                    redis_client = Redis.from_url(
+                        settings.redis_url.get_secret_value(),
+                        decode_responses=True,
+                        socket_timeout=2,
+                    )
                     await redis_client.ping()
                     cache = RedisMemoryCache(redis_client, settings.redis_cache_ttl_seconds)
-                    logger.info("Redis memory-search cache enabled")
                 except Exception:
                     logger.warning("Redis unavailable; continuing without cache", exc_info=True)
-                    if redis_client is not None:
+                    if redis_client:
                         await redis_client.aclose()
                     redis_client = None
 
-            logger.info("Loading locally saved MiniLM embeddings on CPU...")
             embedder = EmbeddingService(settings.embedding_model_path, settings.embedding_dimensions)
             await embedder.startup()
             brain = GeminiBrain(
-                settings.gemini_api_key.get_secret_value(), settings.gemini_model,
+                settings.gemini_api_key.get_secret_value(),
+                settings.gemini_model,
                 settings.max_facts_per_message,
             )
             app.state.settings = settings
@@ -88,23 +82,19 @@ async def lifespan(app: FastAPI):
                 settings.fact_similarity_floor, cache=cache,
             )
             app.state.retriever = MemoryRetriever(store, embedder, cache=cache)
-            logger.info("Ready at http://127.0.0.1:8000/docs")
             yield
         finally:
-            logger.info("Graceful shutdown: closing Gemini, embeddings and Redis...")
-            if brain is not None:
+            if brain:
                 await brain.close()
-            if embedder is not None:
+            if embedder:
                 await embedder.shutdown()
-            if redis_client is not None:
+            if redis_client:
                 await redis_client.aclose()
-            # The async context manager closes the PostgreSQL pool last.
-            logger.info("Shutdown complete")
 
 
 app = FastAPI(
     title="Agentic AI Memory System - PostgreSQL + LangGraph",
-    description="Durable PostgreSQL LangGraph checkpoints and pgvector long-term memory; optional Redis cache",
+    description="PostgreSQL checkpoints and pgvector long-term memory with optional Redis cache",
     lifespan=lifespan,
 )
 app.include_router(memory_router)
@@ -123,12 +113,14 @@ async def health():
 
 @app.get("/ready", tags=["Health"])
 async def ready(request: Request):
+    state = request.app.state
     try:
-        await request.app.state.store.verify()
-        await request.app.state.checkpointer.aget_tuple(
-            {"configurable": {"thread_id": "__readiness_probe__"}}
-        )
-        return {"status": "ready", "embedding_dimensions": request.app.state.settings.embedding_dimensions,
-                "checkpoint_backend": "postgresql"}
+        await state.store.verify()
+        await state.checkpointer.aget_tuple({"configurable": {"thread_id": "__readiness_probe__"}})
+        return {
+            "status": "ready",
+            "embedding_dimensions": state.settings.embedding_dimensions,
+            "checkpoint_backend": "postgresql",
+        }
     except Exception:
         raise HTTPException(status_code=503, detail="PostgreSQL/checkpointer unavailable") from None
