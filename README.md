@@ -1,194 +1,247 @@
-# Agentic AI Memory System — LangGraph + PostgreSQL + optional Redis
+# Agentic AI Memory System
 
-LangGraph chat memory now survives API restarts using **`AsyncPostgresSaver`**.
-Long-term entities, atomic facts, corrections, and the graph-view API are stored
-in **PostgreSQL with pgvector** rather than Neo4j. **Redis is optional** and
-caches expensive semantic search responses; PostgreSQL remains the only durable
-source of truth. The existing FastAPI routes and Streamlit UI remain available.
+An AI chat application that remembers useful facts about users across conversations. It combines LangGraph, FastAPI, Google Gemini, PostgreSQL with pgvector, local MiniLM embeddings, and an optional Redis cache.
+
+## Features
+
+- Chat with the AI through a Streamlit interface or REST API.
+- Save conversation state using LangGraph checkpoints in PostgreSQL.
+- Extract and store long-term facts for each user.
+- Retrieve relevant facts using vector similarity search.
+- Update facts when information changes and mark older facts as superseded.
+- View saved facts and their relationships in a memory graph.
+- Search faster with optional Redis caching.
+- View or delete conversation sessions and delete individual saved facts.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    UI[Streamlit] --> API[FastAPI]
-    API --> LG[LangGraph]
-    LG --> CP[(PostgreSQL: AsyncPostgresSaver checkpoints)]
-    LG --> R[Long-term memory retrieval]
-    R --> PG[(PostgreSQL: pgvector entities + facts)]
-    R -. Optional cache .-> REDIS[(Redis: short TTL search results)]
-    LG --> GEM[Gemini: replies and fact extraction]
-    GEM --> EMB[MiniLM: local CPU embeddings]
-    EMB --> PG
+flowchart TD
+    UI[Streamlit UI] --> API[FastAPI]
+    API --> LG[LangGraph agent]
+    LG <--> CP[(PostgreSQL checkpoints)]
+    LG --> MM[Memory manager and retriever]
+    MM --> GEM[Google Gemini]
+    MM --> EMB[MiniLM embeddings]
+    EMB --> DB[(PostgreSQL + pgvector)]
+    MM <--> DB
+    MM -. Optional cache .-> REDIS[(Redis)]
 ```
 
-**Why two PostgreSQL persistence layers?** LangGraph's checkpointer only
-persists **per-thread graph state** (messages, workflow state, interrupts). It
-is *not* a general multi-user semantic memory database. The relational tables
-`memory_users`, `memory_entities`, and `memory_facts` persist cross-session facts
-with deletion, reinforcement, replacement, graph rendering and similarity
-search. The graph visualization is assembled from PostgreSQL relations, not
-from Neo4j. A Redis checkpointer is deliberately *not* run alongside Postgres:
-it would create competing checkpoint authorities.
+### Main components
+
+| Component | Responsibility |
+| --- | --- |
+| **LangGraph** | Runs the chat workflow and manages conversation state. |
+| **PostgreSQL checkpoint saver** | Persists messages and workflow state for each user/session conversation. |
+| **PostgreSQL + pgvector** | Stores user-scoped entities and facts and supports semantic search. |
+| **Google Gemini** | Generates chat responses and extracts facts from messages. |
+| **MiniLM** | Creates 384-dimensional text embeddings locally on the machine. |
+| **Redis (optional)** | Temporarily caches memory-search results. PostgreSQL remains the durable storage. |
+| **FastAPI** | Exposes chat and memory endpoints. |
+| **Streamlit** | Provides a browser-based chat, memory list, and graph interface. |
+
+**Conversation checkpoints** keep the messages for a particular session. **Long-term memory** stores facts that can be retrieved across that user's sessions.
 
 ## Requirements
 
-- Python 3.11 or 3.12 recommended
-- Docker with Docker Compose, or existing PostgreSQL 16+ with pgvector installed
-- Google Gemini API key (model availability and quotas may change)
-- Internet for dependency/model download and Gemini inference
-- Recommended: at least 8 GB RAM (the MiniLM model runs locally on CPU)
+- Python 3.11 or newer
+- Docker with Docker Compose
+- Google Gemini API key
+- Internet connection for installing packages, downloading the MiniLM model, and Gemini requests
+- Recommended: 8 GB RAM
 
-## Quick start
+## Setup
 
-Run commands from the repo root:
+Run the commands from the repository folder.
+
+### 1. Configure environment variables
+
+macOS/Linux:
 
 ```bash
 cp .env.example .env
-# Edit .env: set GEMINI_API_KEY, POSTGRES_PASSWORD and matching POSTGRES_DSN.
-# Keep .env out of Git.
-docker compose up -d                    # PostgreSQL with pgvector
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Open `.env` and set `GEMINI_API_KEY`. Set a local `POSTGRES_PASSWORD` and make sure `POSTGRES_DSN` uses the same username, password, host, port, and database. URL-encode special characters in the DSN password.
+
+### 2. Start PostgreSQL
+
+```bash
+docker compose up -d
+```
+
+### 3. Install Python dependencies
+
+macOS/Linux:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+Then run:
+
+```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python scripts/download_model.py
 python scripts/check_setup.py
+```
+
+### 4. Start the API and UI
+
+Terminal 1 — API:
+
+```bash
 python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-Start the existing frontend in another terminal:
+Terminal 2 — Streamlit UI (activate the virtual environment first):
 
 ```bash
-source .venv/bin/activate
 python -m streamlit run frontend.py
 ```
 
-- API docs: <http://127.0.0.1:8000/docs>
-- Readiness probe: <http://127.0.0.1:8000/ready>
-- Streamlit UI: <http://localhost:8501>
+Open these URLs:
 
-Startup initializes the pgvector schema, runs `AsyncPostgresSaver.setup()`
-(checkpoint migrations) and compiles LangGraph using the live saver. The
-application's PostgreSQL account needs `CREATE`/DDL privileges during initial
-setup. For a production deployment, run schema migrations separately with one
-migrator; do not let multiple replicas migrate simultaneously.
+- **Streamlit UI:** http://127.0.0.1:8501
+- **Interactive API docs:** http://127.0.0.1:8000/docs
+- **API readiness:** http://127.0.0.1:8000/ready
+- **Health check:** http://127.0.0.1:8000/health
 
-### Enable Redis (optional)
+At startup, the API initializes the memory tables and LangGraph checkpoint schema. The configured PostgreSQL user must have permission to create the required tables and indexes.
+
+## Optional Redis cache
+
+Redis is optional. The application can run without it.
+
+Start Redis:
 
 ```bash
 docker compose --profile redis up -d
 ```
 
-In `.env`, set:
+Set these values in `.env`:
 
 ```dotenv
 REDIS_URL=redis://127.0.0.1:6379/0
 REDIS_CACHE_TTL_SECONDS=60
 ```
 
-Restart the API. If Redis becomes unavailable, memory retrieval automatically
-falls back to PostgreSQL; conversation checkpoints are unaffected. Redis keys
-use hashed user IDs and query text, and cached results expire. The cache
-version is bumped whenever facts are created, changed, or soft-deleted. Treat
-Redis as confidential storage because *values* still contain user facts.
+Restart the API after changing `.env`. When Redis is disabled or unavailable, memory searches use PostgreSQL without the cache.
 
-### Configuration
+## Configuration
 
-| Setting | Purpose |
+| Variable | Purpose |
 | --- | --- |
-| `POSTGRES_DSN` | PostgreSQL connection string for **both** checkpoints and long-term facts. URL-encode special password characters. |
-| `POSTGRES_PASSWORD`, `POSTGRES_USER`, `POSTGRES_DB` | Local Docker service credentials/database; keep DSN consistent. |
-| `PG_POOL_MIN_SIZE`, `PG_POOL_MAX_SIZE` | Pooled psycopg connections for checkpointer and memory store (defaults 1/10). |
-| `REDIS_URL` | Empty = Redis disabled; otherwise cache only. |
-| `REDIS_CACHE_TTL_SECONDS` | Search cache expiration in seconds (default 60). |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini provider credentials/model. |
-| `EMBEDDING_MODEL_PATH` | On-disk 384-dimensional MiniLM model. |
-| `AUTH_TOKEN` | Optional **shared** API key for local demos; not user authentication. |
+| `GEMINI_API_KEY` | Required API key for Google Gemini. |
+| `GEMINI_MODEL` | Gemini model name. |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | PostgreSQL credentials used by Docker Compose. |
+| `POSTGRES_DSN` | Connection string used by the memory store and checkpoint saver. |
+| `PG_POOL_MIN_SIZE`, `PG_POOL_MAX_SIZE` | Minimum and maximum pooled database connections. |
+| `EMBEDDING_MODEL_PATH` | Local directory for the MiniLM model. |
+| `EMBEDDING_DIMENSIONS` | Embedding size; this project uses 384. |
+| `REDIS_URL` | Optional Redis connection. Leave empty to disable Redis. |
+| `REDIS_CACHE_TTL_SECONDS` | Lifetime of cached search results in seconds. |
+| `AUTH_TOKEN` | Optional shared API key. When set, send it in the `X-API-Key` header. |
 
-### Existing APIs (preserved)
+## API documentation
 
-| Method | Route | Behavior |
+The interactive Swagger UI at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) lists request schemas and response formats.
+
+| Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `POST` | `/chat` | Chat using persistent LangGraph thread memory; retrieve/ingest cross-session facts. |
-| `POST` | `/users/{user_id}/memories` | Extract and ingest facts. |
-| `GET` | `/users/{user_id}/memories` | List active facts, optionally superseded history. |
-| `POST` | `/users/{user_id}/memories/search` | Vector similarity search with optional Redis cache. |
-| `GET` | `/users/{user_id}/graph` | Render entities and relationships from SQL rows. |
-| `DELETE` | `/users/{user_id}/memories/{fact_id}` | Soft-delete one fact; invalidate cached results. |
-| `GET` | `/users/{user_id}/sessions/{session_id}` | **New**: retrieve a session's saved messages, including after API restarts. |
-| `DELETE` | `/users/{user_id}/sessions/{session_id}` | **New**: permanently remove one thread's checkpoints/history; long-term facts are unchanged. |
+| `POST` | `/chat` | Send a message and receive an AI response using the session's checkpoint state and relevant saved facts. |
+| `GET` | `/users/{user_id}/sessions/{session_id}` | Read saved messages for a conversation session. |
+| `DELETE` | `/users/{user_id}/sessions/{session_id}` | Delete a session's checkpoint history. Long-term facts remain stored. |
+| `POST` | `/users/{user_id}/memories` | Extract and store facts from a message. |
+| `GET` | `/users/{user_id}/memories` | List saved facts. Use `include_history=true` to include superseded facts. |
+| `POST` | `/users/{user_id}/memories/search` | Search saved facts by semantic similarity. |
+| `GET` | `/users/{user_id}/graph` | Return the user's memory graph as nodes and edges. |
+| `DELETE` | `/users/{user_id}/memories/{fact_id}` | Remove a fact from active retrieval. |
 
-The `/chat` JSON contract is unchanged:
+### Example: chat
+
+Request:
 
 ```json
 {
-  "user_id": "user_101",
-  "session_id": "first-conversation",
-  "message": "Do you remember which framework I use?"
+  "user_id": "demo_user",
+  "session_id": "conversation_1",
+  "message": "I am building TaskFlow with FastAPI and prefer dark mode."
 }
 ```
 
-The same `(user_id, session_id)` pair resumes the same PostgreSQL thread,
-including after a process restart. A different `session_id` starts a distinct
-conversation, while fact memory remains accessible across that user's sessions.
-The sidebar can load an earlier conversation using the saved Session ID.
-A deterministic SHA-256 hash maps the pair to a bounded, opaque `thread_id`.
-Business service clients are passed as **LangGraph runtime context**, never
-serialized in the checkpoint.
+Send it to `POST /chat`. The response includes an `answer`, `relevant_memories`, and `memory_update` status. Reusing the same user and session IDs continues the same conversation.
 
-### Memory retention, removal and safety
+### Example: memory search
 
-- **Fact delete is a soft delete**; the record remains in PostgreSQL for audit
-  unless separately purged. Deleted/superseded facts are excluded from active
-  retrieval but may also appear in **prior chat checkpoints**. Full erasure
-  requires cleaning both the fact records and affected thread checkpoints.
-- **Session delete** uses `AsyncPostgresSaver.adelete_thread`, removing that
-  session's checkpoint history but **not** extracted long-term facts.
-- Checkpoint snapshots grow with ongoing chats. The Gemini prompt uses the last
-  10 chat messages; configure pruning/compaction or state summarization for
-  sustained production conversations.
-- The per-user ingestion lock and per-thread chat/delete lock serialize work
-  **within one FastAPI process**. Before using multiple replicas, add a
-  distributed lock or serialize runs by `thread_id` and fact ingestion by `user_id`.
-- PostgreSQL uses exact cosine ordering **after user scoping** for reliability;
-  for high-cardinality production datasets, benchmark per-tenant partitioning,
-  pgvector ANN indexes and query plans before enabling global HNSW indexes.
-- `/chat` rejects easily detected credentials before durable checkpointing;
-  this heuristic is not complete DLP. Never submit sensitive secrets.
-- Protect PostgreSQL/Redis with network restrictions, TLS, credentials and
-  backups. Redis here is an ephemeral cache with no disk persistence.
-- The optional `AUTH_TOKEN` is shared between users; do **not** publish this
-  example as a multi-tenant public API without real authentication and
-  authorization mapped to `user_id`.
+Request to `POST /users/demo_user/memories/search`:
 
-## Migrating existing Neo4j data
+```json
+{
+  "query": "Which backend framework does TaskFlow use?",
+  "top_k": 5
+}
+```
 
-**Applying this code patch does not migrate or delete Neo4j data.** All new
-facts are written to PostgreSQL. If you need prior Neo4j memories, export
-user-scoped entities/facts (including embeddings and superseding status),
-import into the matching PostgreSQL tables while retaining IDs, and compare
-per-user counts *before* decommissioning Neo4j. If you do not require the old
-facts, start with an empty PostgreSQL database. The old in-process chat buffer
-was ephemeral and cannot be recovered after the earlier API exits.
+The response contains the query and a list of relevant memories with their statements and similarity scores.
 
-## Tests and demo
+## Tests
+
+Install development dependencies:
 
 ```bash
 python -m pip install -r requirements-dev.txt
+```
+
+Run the automated tests:
+
+```bash
 python -m pytest -q
+```
+
+The tests cover:
+
+| Test area | What it checks |
+| --- | --- |
+| Agent workflow | Retrieval, response generation flow, saved messages, and safe handling of ambiguous forget requests. |
+| API contract | Available routes, request/response behavior, authorization, and session operations. |
+| Checkpoint configuration | Stable and user/session-specific thread IDs. |
+| Redis cache | Cache behavior and fallback-safe operations. |
+| Thread locks | Concurrent operations for the same thread. |
+| PostgreSQL integration | Fact lifecycle, user isolation, and persistent checkpoint behavior. |
+
+PostgreSQL integration tests are skipped unless `POSTGRES_TEST_DSN` is set to an **isolated test database** with pgvector installed. Never point the test DSN at production data.
+
+## Demonstrate memory
+
+Start PostgreSQL, run setup, and start the API. Then run:
+
+```bash
 python scripts/demo.py
 ```
 
-Database-backed integration tests run only when `POSTGRES_TEST_DSN` is set to an
-isolated PostgreSQL database with pgvector. They use randomized user/thread IDs
-and test persistence/restart behavior. Unit tests use fake dependencies and do
-not require Gemini, Redis, or PostgreSQL. Smoke-test with a real Gemini key
-before production use.
+The demo sends sample facts, updates a project's framework, and searches the memory store. You can also enter messages in Streamlit, inspect the saved facts and graph, and restart the API to demonstrate that session checkpoints are persistent.
 
-### References
+## Security notes
 
-- [LangGraph persistence: checkpoints vs. stores](https://docs.langchain.com/oss/python/langgraph/persistence)
-- [AsyncPostgresSaver reference](https://reference.langchain.com/python/langgraph.checkpoint.postgres/aio/AsyncPostgresSaver)
-- [LangGraph runtime context](https://reference.langchain.com/python/langgraph/runtime/Runtime)
-- [pgvector](https://github.com/pgvector/pgvector)
-- [Redis for LangGraph (alternative checkpoint backend; not used here)](https://github.com/redis-developer/langgraph-redis)
+- Keep `.env` private and never commit API keys or database passwords.
+- Keep the demo API bound to localhost unless proper authentication and authorization are configured.
+- `AUTH_TOKEN` is a shared API key, not per-user authentication.
+- Use a separate database for integration tests.
+- Deleting a session removes its checkpoint history but does not delete that user's long-term facts.
