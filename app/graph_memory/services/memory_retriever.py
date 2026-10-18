@@ -14,13 +14,19 @@ def _terms(query: str) -> set[str]:
 
 
 class MemoryRetriever:
-    def __init__(self, store, embedder):
+    def __init__(self, store, embedder, cache=None):
         self.store = store
         self.embedder = embedder
+        self.cache = cache
 
     async def search(
         self, user_id: str, query: str, top_k: int = 7, include_history: bool = False,
     ) -> SearchResponse:
+        cache_version = None
+        if self.cache is not None:
+            cached, cache_version = await self.cache.get_search(user_id, query, top_k, include_history)
+            if cached is not None:
+                return SearchResponse.model_validate(cached)
         vector = await self.embedder.embed(query)
         facts = await self.store.search_facts(
             user_id, vector, top_k=min(top_k * 4, 60), include_history=include_history
@@ -61,4 +67,7 @@ class MemoryRetriever:
             )
             for score, row in sorted(ranked.values(), key=lambda x: x[0], reverse=True)[:top_k]
         ]
-        return SearchResponse(user_id=user_id, query=query, memories=memories)
+        result = SearchResponse(user_id=user_id, query=query, memories=memories)
+        if self.cache is not None:
+            await self.cache.set_search(user_id, query, top_k, include_history, result.model_dump(), cache_version)
+        return result

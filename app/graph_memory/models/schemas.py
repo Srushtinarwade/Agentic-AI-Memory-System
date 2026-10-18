@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 class AtomicFact(BaseModel):
-    """Validated response from Gemini. No freeform Cypher is ever accepted."""
+    """Validated response from Gemini. No model-generated SQL is ever accepted."""
     model_config = ConfigDict(extra="forbid")
 
     subject: str = Field(description="USER or a specifically named entity")

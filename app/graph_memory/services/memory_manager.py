@@ -29,13 +29,14 @@ def reject_secrets(message: str) -> None:
 
 
 class MemoryManager:
-    """Single-process per-user lock protects read/plan/commit from duplicate races."""
-    def __init__(self, store, brain, embedder, entity_floor: float, fact_floor: float):
+    """Per-process lock prevents races in memory resolution on one API worker."""
+    def __init__(self, store, brain, embedder, entity_floor: float, fact_floor: float, cache=None):
         self.store = store
         self.brain = brain
         self.embedder = embedder
         self.entity_floor = entity_floor
         self.fact_floor = fact_floor
+        self.cache = cache
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
 
@@ -87,9 +88,11 @@ class MemoryManager:
                     obj, vector_by_text[f.statement], plan,
                 )
             if plan.operations:
-                # Every graph mutation in this message is committed in one Neo4j transaction.
+                # Every memory mutation in this message is committed in one PostgreSQL transaction.
                 # Remote Gemini calls are finished *before* this transaction begins.
                 await self.store.apply_plan(user_id, plan, source_id)
+                if self.cache is not None:
+                    await self.cache.invalidate(user_id)
             return IngestResponse(
                 user_id=user_id, status="success", source_message_id=source_id,
                 operations=plan.operations,

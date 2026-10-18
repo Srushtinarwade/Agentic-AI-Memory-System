@@ -1,4 +1,4 @@
-"""Tests run without Neo4j, real Gemini, network, or model downloads."""
+"""Tests run without PostgreSQL, Redis, Gemini, network or model downloads."""
 from __future__ import annotations
 
 from dataclasses import asdict

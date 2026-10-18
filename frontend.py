@@ -16,7 +16,7 @@ HEADERS = {"X-API-Key": API_TOKEN} if API_TOKEN else {}
 
 st.set_page_config(page_title="Graph Memory AI", page_icon="🧠", layout="wide")
 st.title("🧠 Agentic AI — Graph Memory")
-st.caption("Gemini chat · Neo4j long-term memory · local CPU embeddings")
+st.caption("Gemini chat · LangGraph PostgreSQL checkpoints · pgvector memories · optional Redis cache")
 
 if "user" not in st.session_state:
     st.session_state.user = "user_101"
@@ -28,12 +28,30 @@ if "messages" not in st.session_state:
 with st.sidebar:
     st.subheader("Settings")
     st.session_state.user = st.text_input("User ID", st.session_state.user)
+    requested_session = st.text_input(
+        "Session ID (keep this to resume a chat)",
+        value=st.session_state.session,
+        key="requested_session",
+    )
+    if st.button("Load / resume session"):
+        try:
+            resp = requests.get(
+                f"{API}/users/{st.session_state.user}/sessions/{requested_session}",
+                headers=HEADERS, timeout=20,
+            )
+            resp.raise_for_status()
+            st.session_state.session = requested_session
+            st.session_state.messages = resp.json()["messages"]
+            st.rerun()
+        except requests.RequestException as exc:
+            st.error(f"Could not load session: {exc}")
     if st.button("＋ New conversation"):
         st.session_state.session = str(uuid.uuid4())
         st.session_state.messages = []
+        del st.session_state["requested_session"]
         st.rerun()
     st.link_button("API documentation", f"{API}/docs")
-    st.link_button("Neo4j Browser", "http://127.0.0.1:7474")
+    st.caption("Memory graph is now served from PostgreSQL (no Neo4j Browser needed).")
     st.caption("Demo only. User IDs are not authentication; keep the API on localhost.")
 
 chat, memory = st.columns([3, 2], gap="large")

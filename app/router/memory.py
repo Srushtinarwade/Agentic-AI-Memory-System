@@ -1,4 +1,4 @@
-"""Graph memory REST API. All durable memories live in Neo4j."""
+"""Durable long-term memory REST API backed by PostgreSQL/pgvector."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, status
@@ -67,4 +67,6 @@ async def delete(
     found = await request.app.state.store.retract(user_id, fact_id)
     if not found:
         raise HTTPException(status_code=404, detail="Active or historical memory not found")
+    if request.app.state.cache is not None:
+        await request.app.state.cache.invalidate(user_id)
     return {"user_id": user_id, "fact_id": fact_id, "status": "deleted"}
