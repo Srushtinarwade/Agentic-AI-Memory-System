@@ -1,4 +1,4 @@
-"""Per-user identity resolution: normalized aliases -> local staged -> Neo4j ANN -> Gemini."""
+"""Per-user identity resolution: normalized aliases -> local staged -> PostgreSQL/pgvector similarity -> Gemini."""
 from __future__ import annotations
 
 import math

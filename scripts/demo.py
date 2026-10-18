@@ -36,7 +36,7 @@ def main():
     print(json.dumps(call(f"/users/{USER}/memories/search", {
         "query": "What did TaskFlow use before FastAPI?", "include_history": True
     }), indent=2))
-    print(f"Open {ROOT}/docs and Neo4j Browser to explore the graph.")
+    print(f"Open {ROOT}/docs and the Streamlit graph panel to explore facts.")
 
 
 if __name__ == "__main__":

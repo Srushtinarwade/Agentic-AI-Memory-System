@@ -1,6 +1,5 @@
-"""Offline API/lifespan tests using fake external clients (no Neo4j/Gemini needed)."""
+"""Offline FastAPI lifespan/contract tests with fake Postgres, Gemini and saver."""
 import importlib
-import importlib.util
 import sys
 import types
 
@@ -9,76 +8,64 @@ from pydantic import SecretStr
 import pytest
 
 from app.graph_memory.models.schemas import IngestResponse, MemoryResult, SearchResponse
-
-
-def _missing(name):
-    try:
-        return importlib.util.find_spec(name) is None
-    except (ImportError, ValueError, ModuleNotFoundError):
-        return True
+from dependency_stubs import install_agent_stubs, install_db_stubs
 
 
 @pytest.fixture
 def app_module(monkeypatch):
-    if _missing("neo4j"):
-        neo = types.ModuleType("neo4j")
-        neo.AsyncGraphDatabase = types.SimpleNamespace(driver=lambda *a, **kw: None)
-        neo.RoutingControl = types.SimpleNamespace(READ="READ")
-        monkeypatch.setitem(sys.modules, "neo4j", neo)
-
-    if _missing("google.genai"):
-        google = types.ModuleType("google")
-        google.__path__ = []
-        genai = types.ModuleType("google.genai")
-        genai.types = types.ModuleType("google.genai.types")
-        google.genai = genai
-        monkeypatch.setitem(sys.modules, "google", google)
-        monkeypatch.setitem(sys.modules, "google.genai", genai)
-
-    if _missing("langgraph.graph"):
-        graph = types.ModuleType("langgraph.graph")
-        pkg = types.ModuleType("langgraph")
-        pkg.__path__ = []
-
-        class StateGraph:
-            def __init__(self, schema):
-                self.nodes = {}
-
-            def add_node(self, name, callback):
-                self.nodes[name] = callback
-
-            def add_edge(self, *args):
-                pass
-
-            def add_conditional_edges(self, *args):
-                pass
-
-            def compile(self):
-                return self
-
-        graph.StateGraph = StateGraph
-        graph.START = "start"
-        graph.END = "end"
-        monkeypatch.setitem(sys.modules, "langgraph", pkg)
-        monkeypatch.setitem(sys.modules, "langgraph.graph", graph)
-
-    for name in ["main", "app.agent", "app.router.chat", "app.router.memory",
-                 "app.graph_memory.database.neo4j_client", "app.graph_memory.services.memory_extractor"]:
+    install_agent_stubs(monkeypatch)
+    install_db_stubs(monkeypatch)
+    for name in ("main", "app.agent", "app.router.chat", "app.router.memory", "app.graph_memory.services.memory_extractor"):
         monkeypatch.delitem(sys.modules, name, raising=False)
     module = importlib.import_module("main")
     yield module
-    for name in ["main", "app.agent", "app.router.chat", "app.router.memory",
-                 "app.graph_memory.database.neo4j_client", "app.graph_memory.services.memory_extractor"]:
+    for name in ("main", "app.agent", "app.router.chat", "app.router.memory", "app.graph_memory.services.memory_extractor"):
         sys.modules.pop(name, None)
 
 
-class FakeStore:
-    def __init__(self, *args):
-        self.initialized = False
-        self.closed = False
+class FakePool:
+    last = None
 
-    async def initialize(self, wait):
-        assert wait > 0
+    def __init__(self, dsn, **kwargs):
+        assert dsn == "postgresql://localhost/test"
+        assert kwargs["kwargs"]["autocommit"] is True
+        self.closed = False
+        FakePool.last = self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        self.closed = True
+
+    async def wait(self, timeout):
+        pass
+
+
+class FakeSaver:
+    last = None
+
+    def __init__(self, pool):
+        self.setup_done = False
+        self.deleted_threads = []
+        FakeSaver.last = self
+
+    async def setup(self):
+        self.setup_done = True
+
+    async def aget_tuple(self, config):
+        assert self.setup_done
+        return None
+
+    async def adelete_thread(self, tid):
+        self.deleted_threads.append(tid)
+
+
+class FakeStore:
+    def __init__(self, pool):
+        self.initialized = False
+
+    async def initialize(self):
         self.initialized = True
 
     async def verify(self):
@@ -94,18 +81,14 @@ class FakeStore:
     async def retract(self, user, fid):
         return user == "alice" and fid == "f1"
 
-    async def close(self):
-        self.closed = True
-
 
 class FakeEmbedder:
     def __init__(self, path, dimensions):
         assert dimensions == 384
-        self.started = False
         self.closed = False
 
     async def startup(self):
-        self.started = True
+        pass
 
     async def shutdown(self):
         self.closed = True
@@ -121,57 +104,70 @@ class FakeBrain:
 
 
 class FakeManager:
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         pass
 
-    async def ingest(self, user, message, source_id):
+    async def ingest(self, user, message, source_id=None):
         return IngestResponse(user_id=user, status="ignored", reason="No durable facts found")
 
 
 class FakeRetriever:
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         pass
 
-    async def search(self, user, query, top_k, include_history):
+    async def search(self, user, query, top_k, include_history=False):
         return SearchResponse(user_id=user, query=query, memories=[MemoryResult(
             fact_id="f1", statement="User likes tea", predicate="LIKES",
             subject="User", object="Tea", status="active", score=0.98, seen_count=1,
         )])
 
 
+class FakeAgent:
+    calls = []
+
+    def __init__(self, saver):
+        assert saver is FakeSaver.last
+
+    async def aget_state(self, config):
+        return types.SimpleNamespace(values={"messages": []})
+
+    async def ainvoke(self, payload, config, context):
+        self.calls.append((payload, config, context))
+        assert context.store is not None and context.brain is not None
+        return {"answer": "Sure!", "memories": [], "memory_update": "ignored"}
+
+
 @pytest.mark.parametrize("route", [
     "/chat", "/users/{user_id}/memories", "/users/{user_id}/memories/search",
     "/users/{user_id}/graph", "/users/{user_id}/memories/{fact_id}",
+    "/users/{user_id}/sessions/{session_id}",
 ])
 def test_route_exposed_in_openapi(app_module, route):
-    paths = app_module.app.openapi()["paths"]
-    assert route in paths
+    assert route in app_module.app.openapi()["paths"]
 
 
 def test_lifespan_authorization_and_memory_routes(app_module, monkeypatch):
     settings = types.SimpleNamespace(
-        neo4j_password=SecretStr("localpassword"), gemini_api_key=SecretStr("my-test-api-key"),
-        neo4j_uri="bolt://127.0.0.1:7687", neo4j_user="neo4j", neo4j_database="neo4j",
-        startup_index_wait_seconds=10, embedding_model_path="models/test",
+        postgres_dsn=SecretStr("postgresql://localhost/test"),
+        pg_pool_min_size=1, pg_pool_max_size=10,
+        redis_url=SecretStr(""), redis_cache_ttl_seconds=60,
+        gemini_api_key=SecretStr("my-test-api-key"), embedding_model_path="models/test",
         embedding_dimensions=384, gemini_model="fake-gemini", max_facts_per_message=15,
         entity_similarity_floor=0.78, fact_similarity_floor=0.68, auth_token=SecretStr("localtesttoken"),
     )
     monkeypatch.setattr(app_module, "Settings", lambda: settings)
-    monkeypatch.setattr(app_module, "Neo4jStore", FakeStore)
+    monkeypatch.setattr(app_module, "AsyncConnectionPool", FakePool)
+    monkeypatch.setattr(app_module, "AsyncPostgresSaver", FakeSaver)
+    monkeypatch.setattr(app_module, "PostgresMemoryStore", FakeStore)
     monkeypatch.setattr(app_module, "EmbeddingService", FakeEmbedder)
     monkeypatch.setattr(app_module, "GeminiBrain", FakeBrain)
     monkeypatch.setattr(app_module, "MemoryManager", FakeManager)
     monkeypatch.setattr(app_module, "MemoryRetriever", FakeRetriever)
-    import app.router.chat as chat_router
+    monkeypatch.setattr(app_module, "build_agent", FakeAgent)
 
-    class FakeAgent:
-        async def ainvoke(self, payload):
-            return {"answer": "Sure!", "memories": [], "memory_update": "ignored"}
-
-    monkeypatch.setattr(chat_router, "agent", FakeAgent())
     with TestClient(app_module.app) as client:
         assert client.get("/health").status_code == 200
-        assert client.get("/ready").json()["status"] == "ready"
+        assert client.get("/ready").json()["checkpoint_backend"] == "postgresql"
         assert client.get("/users/alice/memories").status_code == 401
         h = {"X-API-Key": "localtesttoken"}
         assert client.get("/users/alice/memories", headers=h).json()["memories"][0]["fact_id"] == "f1"
@@ -185,6 +181,12 @@ def test_lifespan_authorization_and_memory_routes(app_module, monkeypatch):
         assert client.post("/chat", headers=h, json={
             "user_id": "alice", "session_id": "s1", "message": "Hi",
         }).json()["answer"] == "Sure!"
-        store, brain, embedder = (app_module.app.state.store, app_module.app.state.brain,
-                                  app_module.app.state.embedder)
-    assert store.closed and brain.closed and embedder.closed
+        assert FakeAgent.calls[-1][1]["configurable"]["thread_id"].startswith("chat:")
+        assert client.post("/chat", headers=h, json={
+            "user_id": "alice", "session_id": "s1", "message": "My password is secretpassword123",
+        }).status_code == 422
+        assert client.get("/users/alice/sessions/s1", headers=h).json()["messages"] == []
+        assert client.delete("/users/alice/sessions/s1", headers=h).json()["status"] == "deleted"
+        assert FakeSaver.last.deleted_threads == [FakeAgent.calls[-1][1]["configurable"]["thread_id"]]
+        brain, embedder = app_module.app.state.brain, app_module.app.state.embedder
+    assert brain.closed and embedder.closed and FakePool.last.closed
